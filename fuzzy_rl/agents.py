@@ -17,6 +17,28 @@ class ActorCriticContinuingClip:
         eps=1e-2,
         use_bootstrap_denom=True,
     ):
+        """Actor-critic for the continuing (no episode resets) setting with two
+        variance-reduction tricks: fractional NLMS critic updates (Trick 1) and
+        TD-error clipping scaled by reward standard deviation (Trick 2).
+
+        Args:
+            feat: Feature extractor (e.g. RBFFeaturesPendulum); its `.n` attribute
+                gives the feature-vector dimension used to size all weight vectors.
+            alpha_mu: Step size for the policy mean weights (theta_mu).
+            alpha_sigma: Step size for the policy log-std weights (theta_sigma).
+            alpha_r: EMA rate for the reward-rate estimate R_bar and its variance
+                r_var; also controls the bias-correction denominator.
+            lam_w: Eligibility-trace decay for the critic (z_w). 0 = TD(0), 1 = MC.
+            lam_theta: Eligibility-trace decay for both actor traces (z_mu, z_sigma).
+            m: Fractional divisor in the NLMS critic step (w += delta / (m * denom) * z_w).
+                m >= 1 ensures the update is a contraction and prevents overshoot.
+            l: Clip multiplier; the TD error is clipped to ±l * sigma_r before
+                any weight update. Typical values: 2–3.
+            eps: Floor on the NLMS denominator magnitude to prevent division by near-zero.
+            use_bootstrap_denom: If True the NLMS denominator uses z_w · (x − x′),
+                which accounts for the moving bootstrap target. If False it uses z_w · x,
+                which is better-conditioned but ignores the bootstrap correction.
+        """
         d = feat.n
         self.feat = feat
         self.w = np.zeros(d)
@@ -126,6 +148,17 @@ class ActorCriticContinuing:
         lam_w: float,
         lam_theta: float,
     ):
+        """Vanilla differential actor-critic (continuing tasks, no tricks).
+
+        Args:
+            feat: Feature extractor; `.n` gives the feature-vector dimension.
+            alpha_w: Step size for the critic (value) weights w.
+            alpha_mu: Step size for the policy mean weights theta_mu.
+            alpha_sigma: Step size for the policy log-std weights theta_sigma.
+            alpha_r: EMA rate for the average-reward estimate R_bar.
+            lam_w: Eligibility-trace decay for the critic trace z_w.
+            lam_theta: Eligibility-trace decay for the actor traces z_mu and z_sigma.
+        """
         d = feat.n
         self.feat = feat
         self.w = np.zeros(d)  # value weights
@@ -191,5 +224,136 @@ class ActorCriticContinuing:
         self.w += self.alpha_w * delta * self.z_w
         self.theta_mu += self.alpha_mu * delta * self.z_mu
         self.theta_sigma += self.alpha_sigma * delta * self.z_sigma
+
+        return delta
+
+
+class ActionValueContinuingClip:
+    def __init__(
+        self,
+        feat,
+        n_actions=9,
+        a_low=-2.0,
+        a_high=2.0,
+        alpha_r=0.01,
+        lam=0.8,
+        m=2.0,
+        l=2.5,
+        eps=1e-2,
+        epsilon=0.1,
+        use_bootstrap_denom=False,
+        target_mode="q",
+    ):
+        """Differential action-value agent (continuing tasks) with NLMS and
+        TD-error clipping.  Actions are a finite grid; the policy is ε-greedy.
+
+        Args:
+            feat: Feature extractor; `.n` gives the feature-vector dimension.
+            n_actions: Number of discrete actions, evenly spaced over [a_low, a_high].
+            a_low: Lower bound of the action grid.
+            a_high: Upper bound of the action grid.
+            alpha_r: EMA rate for the reward-rate estimate R_bar and its variance r_var.
+            lam: Eligibility-trace decay λ shared by all action traces.
+            m: Fractional divisor in the NLMS update (W += delta / (m * denom) * Z).
+                m >= 1 prevents overshoot.
+            l: Clip multiplier; the TD error is clipped to ±l * sigma_r.
+            eps: Floor on the NLMS denominator to guard against division by near-zero.
+            epsilon: ε-greedy exploration probability.
+            use_bootstrap_denom: If True the NLMS denominator uses Z[j]·x − Z[j*]·x′
+                (bootstrap-corrected); if False uses Z[j]·x only.
+            target_mode: "q" for Q-learning (greedy max over next-state actions with
+                Watkins trace cutting) or "sarsa" for on-policy Sarsa(λ).
+        """
+        self.feat = feat
+        d = feat.n
+        self.actions = np.linspace(
+            a_low, a_high, n_actions
+        )  # includes 0 if n odd
+        self.N = n_actions
+        self.W = np.zeros((self.N, d))  # one value-weight block per action
+        self.Z = np.zeros((self.N, d))  # eligibility trace (same shape)
+
+        self.R_bar = 0.0  # reward rate
+        self.r_var = 0.0  # EMA of (R - R_bar)^2 -> sigma_r^2
+        self.t = 0
+
+        self.alpha_r = alpha_r  # ONLY surviving step size (scalar EMAs)
+        self.lam = lam
+        self.m = m
+        self.l = l
+        self.eps = eps
+        self.epsilon = epsilon
+        self.use_bootstrap_denom = use_bootstrap_denom
+        self.target_mode = (
+            target_mode  # "q" (max target) or "sarsa" (on-policy)
+        )
+
+        self.n_floored = 0
+        self.last_sigma_r = 1.0
+
+    def q_all(self, x):
+        return self.W @ x  # length-N action-value vector
+
+    def act(self, x):
+        """eps-greedy. Returns (action_index, was_greedy)."""
+        greedy_j = int(np.argmax(self.q_all(x)))
+        if np.random.rand() < self.epsilon:
+            j = np.random.randint(self.N)
+            return j, (j == greedy_j)
+        return greedy_j, True
+
+    def reset_traces(self):
+        self.Z[:] = 0.0
+
+    @staticmethod
+    def _floor(d, eps):
+        if abs(d) >= eps:
+            return d
+        return eps if d >= 0.0 else -eps
+
+    def update(self, x, j, R, x_next, j_next, greedy_action):
+        """One differential TD step.
+        j             : action index taken at S
+        j_next        : action index taken at S'  (Sarsa target only)
+        greedy_action : was the action at S greedy? (Watkins trace cut)
+        """
+        self.t += 1
+        q_sa = float(self.W[j] @ x)
+        q_next_all = self.W @ x_next
+        j_star = (
+            int(np.argmax(q_next_all)) if self.target_mode == "q" else j_next
+        )
+        q_next = float(q_next_all[j_star])
+
+        delta = R - self.R_bar + q_next - q_sa
+
+        # --- reward rate + dispersion (the clip scale) ---
+        self.R_bar += self.alpha_r * delta
+        self.r_var += self.alpha_r * ((R - self.R_bar) ** 2 - self.r_var)
+        bc = 1.0 - (1.0 - self.alpha_r) ** self.t
+        sigma_r = np.sqrt(max(self.r_var / bc, 0.0))
+        sigma_r = sigma_r if sigma_r > 1e-8 else 1.0
+        self.last_sigma_r = sigma_r
+
+        # --- trace:  Z <- lam Z ; Z[j] += phi(S)  (grad of q(S,A) wrt W) ---
+        self.Z *= self.lam
+        self.Z[j] += x
+
+        # === Trick 2: clip TD error ===
+        clipped = float(np.clip(delta, -self.l * sigma_r, self.l * sigma_r))
+
+        # === Trick 1: fractional NLMS step ===
+        if self.use_bootstrap_denom:
+            denom_raw = float(self.Z[j] @ x - self.Z[j_star] @ x_next)
+        else:
+            denom_raw = float(self.Z[j] @ x)
+        if abs(denom_raw) < self.eps:
+            self.n_floored += 1
+        denom = self._floor(denom_raw, self.eps)
+        self.W += (clipped / (self.m * denom)) * self.Z
+
+        # --- Watkins Q(lambda): cut traces after a non-greedy action ---
+        if self.target_mode == "q" and not greedy_action:
+            self.Z[:] = 0.0
 
         return delta

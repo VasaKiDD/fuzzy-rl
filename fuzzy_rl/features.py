@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 import numpy as np
 
 
@@ -14,6 +12,13 @@ class RBFFeaturesPendulum:
     def __init__(
         self, n_angle: int = 12, n_vel: int = 8, bandwidth: float = 0.40
     ):
+        """
+        Args:
+            n_angle: Number of angular grid points, evenly spaced over [-π, π).
+            n_vel: Number of angular-velocity grid points, evenly spaced over [-8, 8].
+            bandwidth: RBF kernel bandwidth; larger values make each basis function
+                broader and the feature map smoother.
+        """
         angles = np.linspace(-np.pi, np.pi, n_angle, endpoint=False)
         vels = np.linspace(-8.0, 8.0, n_vel)
         centers = []

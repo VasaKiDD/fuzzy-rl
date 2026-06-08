@@ -220,3 +220,4 @@ __marimo__/
 .idea/
 draft/
 /results/
+/fuzzy_rl/full_pipeline.py
