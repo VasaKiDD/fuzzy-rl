@@ -1,6 +1,6 @@
 import numpy as np
 
-from fuzzy_rl.features import RBFFeatures
+from fuzzy_rl.features import RBFFeaturesPendulum
 
 
 class ActorCriticContinuingClip:
@@ -118,7 +118,7 @@ class ActorCriticContinuingClip:
 class ActorCriticContinuing:
     def __init__(
         self,
-        feat: RBFFeatures,
+        feat: RBFFeaturesPendulum,
         alpha_w: float,
         alpha_mu: float,
         alpha_sigma: float,

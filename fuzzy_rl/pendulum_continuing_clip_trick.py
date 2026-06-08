@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 
 from fuzzy_rl.agents import ActorCriticContinuingClip
 from fuzzy_rl.env import make_continuing_pendulum
-from fuzzy_rl.features import RBFFeatures
+from fuzzy_rl.features import RBFFeaturesPendulum
 
 
 def train(
@@ -14,7 +14,7 @@ def train(
     render: bool = False,
 ):
     np.random.seed(seed)
-    feat = RBFFeatures(n_angle=12, n_vel=8, bandwidth=0.40)
+    feat = RBFFeaturesPendulum(n_angle=12, n_vel=8, bandwidth=0.40)
 
     agent = ActorCriticContinuingClip(
         feat,

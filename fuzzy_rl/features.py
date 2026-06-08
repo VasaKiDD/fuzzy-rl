@@ -1,7 +1,9 @@
+from dataclasses import dataclass
+
 import numpy as np
 
 
-class RBFFeatures:
+class RBFFeaturesPendulum:
     """Normalized RBFs. Centers on a grid over angle x angular velocity.
 
     Observation from Pendulum is [cos(theta), sin(theta), omega], omega in [-8, 8].
