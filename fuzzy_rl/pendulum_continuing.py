@@ -1,90 +1,10 @@
 import numpy as np
-import gymnasium as gym
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from fuzzy_rl.features import RBFFeatures
+from fuzzy_rl.agents import ActorCriticContinuing
 from fuzzy_rl.env import make_continuing_pendulum
-
-
-class ActorCriticContinuing:
-    def __init__(
-        self,
-        feat: RBFFeatures,
-        alpha_w: float,
-        alpha_mu: float,
-        alpha_sigma: float,
-        alpha_r: float,
-        lam_w: float,
-        lam_theta: float,
-    ):
-        d = feat.n
-        self.feat = feat
-        self.w = np.zeros(d)  # value weights
-        self.theta_mu = np.zeros(d)  # policy mean weights
-        self.theta_sigma = np.zeros(d)  # policy log-std weights  -> sigma0 = 1
-        self.R_bar = 0.0  # average-reward estimate
-
-        self.alpha_w = alpha_w
-        self.alpha_mu = alpha_mu
-        self.alpha_sigma = alpha_sigma
-        self.alpha_r = alpha_r
-        self.lam_w = lam_w
-        self.lam_theta = lam_theta
-
-        self.z_w = np.zeros(d)  # value-function trace
-        self.z_mu = np.zeros(d)  # policy-mean trace  ) together these
-        self.z_sigma = np.zeros(d)  # policy-std  trace  ) are z^theta
-
-    # -- value --
-    def value(self, x: np.ndarray) -> float:
-        return float(self.w @ x)
-
-    # -- policy --
-    def policy(self, x: np.ndarray):
-        mu = float(self.theta_mu @ x)
-        log_sigma = float(
-            np.clip(self.theta_sigma @ x, -20.0, 2.0)
-        )  # stability
-        sigma = np.exp(log_sigma)
-        return mu, sigma
-
-    def act(self, x: np.ndarray):
-        mu, sigma = self.policy(x)
-        a = np.random.normal(mu, sigma)
-        return a, mu, sigma
-
-    def reset_traces(self):
-        self.z_w[:] = 0.0
-        self.z_mu[:] = 0.0
-        self.z_sigma[:] = 0.0
-
-    # -- one step of the algorithm in the box --
-    def update(self, x, a, mu, sigma, R, x_next):
-        v_s = self.value(x)
-        v_next = self.value(x_next)
-
-        # delta <- R - R_bar + v(S') - v(S)
-        delta = R - self.R_bar + v_next - v_s
-
-        # R_bar <- R_bar + alpha_R * delta
-        self.R_bar += self.alpha_r * delta
-
-        # score function grad ln pi(A|S, theta)
-        grad_mu = (a - mu) / (sigma**2) * x
-        grad_sigma = ((a - mu) ** 2 / (sigma**2) - 1.0) * x
-
-        # traces:  z <- lambda * z + grad
-        self.z_w = self.lam_w * self.z_w + x  # grad v_hat = x
-        self.z_mu = self.lam_theta * self.z_mu + grad_mu
-        self.z_sigma = self.lam_theta * self.z_sigma + grad_sigma
-
-        # weight updates:  param <- param + alpha * delta * z
-        self.w += self.alpha_w * delta * self.z_w
-        self.theta_mu += self.alpha_mu * delta * self.z_mu
-        self.theta_sigma += self.alpha_sigma * delta * self.z_sigma
-
-        return delta
+from fuzzy_rl.features import RBFFeatures
 
 
 def train(
